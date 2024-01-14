@@ -135,7 +135,7 @@ void Agora::ScheduleDownlinkProcessing(size_t frame_id) {
   }
 
   // Schedule beamformed pilot symbols mapping
-  size_t num_pilot_symbols = config_->Frame().ClientDlPilotSymbols();
+  const size_t num_pilot_symbols = config_->Frame().ClientDlPilotSymbols();
   for (size_t i = 0; i < num_pilot_symbols; i++) {
     if (beam_last_frame_ == frame_id) {
       ScheduleSubcarriers(EventType::kPrecode, frame_id,
@@ -158,7 +158,7 @@ void Agora::ScheduleAntennas(EventType event_type, size_t frame_id,
   auto base_tag = gen_tag_t::FrmSymAnt(frame_id, symbol_id, 0);
 
   size_t num_blocks = config_->BsAntNum() / config_->FftBlockSize();
-  size_t num_remainder = config_->BsAntNum() % config_->FftBlockSize();
+  const size_t num_remainder = config_->BsAntNum() % config_->FftBlockSize();
   if (num_remainder > 0) {
     num_blocks++;
   }
@@ -174,8 +174,9 @@ void Agora::ScheduleAntennas(EventType event_type, size_t frame_id,
       event.tags_[j] = base_tag.tag_;
       base_tag.ant_id_++;
     }
-    TryEnqueueFallback(message_->GetConq(event_type, qid),
-                       message_->GetPtok(event_type, qid), event);
+    stats_->TryEnqueueLogStatsMaster(
+        message_->GetConq(event_type, qid), message_->GetPtok(event_type, qid),
+        event, this->config_->FrameToProfile(), frame_id, symbol_id);
   }
 }
 
@@ -200,7 +201,7 @@ void Agora::ScheduleAntennasTX(size_t frame_id, size_t symbol_id) {
         frame_id, symbol_id, antenna, enqueue_worker_id, worker_events.size());
   }
 
-  //Enqueue all events for all workers
+  // Enqueue all events for all workers
   size_t enqueue_worker_id = 0;
   for (const auto& worker : worker_events) {
     if (!worker.empty()) {
@@ -244,9 +245,10 @@ void Agora::ScheduleSubcarriers(EventType event_type, size_t frame_id,
 
   const size_t qid = (frame_id & 0x1);
   for (size_t i = 0; i < num_events; i++) {
-    TryEnqueueFallback(message_->GetConq(event_type, qid),
-                       message_->GetPtok(event_type, qid),
-                       EventData(event_type, base_tag.tag_));
+    stats_->TryEnqueueLogStatsMaster(
+        message_->GetConq(event_type, qid), message_->GetPtok(event_type, qid),
+        EventData(event_type, base_tag.tag_), this->config_->FrameToProfile(),
+        frame_id, symbol_id);
     base_tag.sc_id_ += block_size;
   }
 }
@@ -273,15 +275,15 @@ void Agora::ScheduleCodeblocks(EventType event_type, Direction dir,
       event.tags_[j] = base_tag.tag_;
       base_tag.cb_id_++;
     }
-    TryEnqueueFallback(message_->GetConq(event_type, qid),
-                       message_->GetPtok(event_type, qid), event);
+    stats_->TryEnqueueLogStatsMaster(
+        message_->GetConq(event_type, qid), message_->GetPtok(event_type, qid),
+        event, this->config_->FrameToProfile(), frame_id, symbol_idx);
   }
 }
 
 void Agora::ScheduleUsers(EventType event_type, size_t frame_id,
                           size_t symbol_id) {
   assert(event_type == EventType::kPacketToMac);
-  unused(event_type);
   auto base_tag = gen_tag_t::FrmSymUe(frame_id, symbol_id, 0);
 
   for (size_t i = 0; i < config_->SpatialStreamsNum(); i++) {
@@ -294,9 +296,12 @@ void Agora::ScheduleUsers(EventType event_type, size_t frame_id,
 void Agora::ScheduleBroadCastSymbols(EventType event_type, size_t frame_id) {
   auto base_tag = gen_tag_t::FrmSym(frame_id, 0u);
   const size_t qid = (frame_id & 0x1);
-  TryEnqueueFallback(message_->GetConq(event_type, qid),
-                     message_->GetPtok(event_type, qid),
-                     EventData(event_type, base_tag.tag_));
+  // kBroadcast event does not have a valid symbol_id
+  const size_t symbol_id = 0;
+  stats_->TryEnqueueLogStatsMaster(
+      message_->GetConq(event_type, qid), message_->GetPtok(event_type, qid),
+      EventData(event_type, base_tag.tag_), this->config_->FrameToProfile(),
+      frame_id, symbol_id);
 }
 
 size_t Agora::FetchEvent(std::vector<EventData>& events_list,
@@ -376,13 +381,20 @@ void Agora::Start() {
   while ((config_->Running() == true) &&
          (SignalHandler::GotExitSignal() == false)) {
     // Get a batch of events
+    size_t dequeue_start_tsc = GetTime::WorkerRdtsc();
     const size_t num_events =
         FetchEvent(events_list, is_turn_to_dequeue_from_io);
+    size_t dequeue_end_tsc = GetTime::WorkerRdtsc();
     is_turn_to_dequeue_from_io = !is_turn_to_dequeue_from_io;
 
     // Handle each event
     for (size_t ev_i = 0; ev_i < num_events; ev_i++) {
       EventData& event = events_list.at(ev_i);
+      size_t frame_id = gen_tag_t(event.tags_[0]).frame_id_;
+      if (frame_id == this->config_->FrameToProfile()) {
+        stats_->LogDequeueStatsMaster(event.event_type_, dequeue_start_tsc,
+                                      dequeue_end_tsc);
+      }
 
       // FFT processing is scheduled after falling through the switch
       switch (event.event_type_) {
@@ -398,9 +410,9 @@ void Agora::Start() {
           if (pkt->frame_id_ >=
               ((frame_tracking_.cur_sche_frame_id_ + kFrameWnd))) {
             AGORA_LOG_ERROR(
-                "Error: Received packet for future frame %u beyond "
-                "frame window (= %zu + %zu). This can happen if "
-                "Agora is running slowly, e.g., in debug mode\n",
+                "Error: Received packet for future frame %u beyond frame "
+                "window (= %zu + %zu). This can happen if Agora is running "
+                "slowly, e.g., in debug mode\n",
                 pkt->frame_id_, frame_tracking_.cur_sche_frame_id_, kFrameWnd);
             cfg->Running(false);
             break;
@@ -878,9 +890,12 @@ void Agora::Start() {
               }
             }
           }
-          TryEnqueueFallback(message_->GetConq(EventType::kFFT, qid),
-                             message_->GetPtok(EventType::kFFT, qid),
-                             do_fft_task);
+          size_t symbol_id = 0;  // kFFT event does not have a valid symbol_id
+          stats_->TryEnqueueLogStatsMaster(
+              message_->GetConq(EventType::kFFT, qid),
+              message_->GetPtok(EventType::kFFT, qid), do_fft_task,
+              this->config_->FrameToProfile(),
+              frame_tracking_.cur_sche_frame_id_, symbol_id);
         }
       }
     } /* End of for */
@@ -1264,7 +1279,7 @@ void Agora::SaveDecodeDataToFile(int frame_id) {
   AGORA_LOG_INFO("Saving decode data to %s\n", kDecodeDataFilename.c_str());
   auto* fp = std::fopen(kDecodeDataFilename.c_str(), "wb");
   if (fp == nullptr) {
-    AGORA_LOG_ERROR("SaveDecodeDataToFile error creating file pointer\n")
+    AGORA_LOG_ERROR("SaveDecodeDataToFile error creating file pointer\n");
   } else {
     for (size_t i = 0; i < cfg->Frame().NumULSyms(); i++) {
       for (size_t j = 0; j < cfg->UeAntNum(); j++) {
@@ -1273,13 +1288,13 @@ void Agora::SaveDecodeDataToFile(int frame_id) {
         const auto write_status =
             std::fwrite(ptr, sizeof(uint8_t), num_decoded_bytes, fp);
         if (write_status != num_decoded_bytes) {
-          AGORA_LOG_ERROR("SaveDecodeDataToFile error while writting file\n")
+          AGORA_LOG_ERROR("SaveDecodeDataToFile error while writting file\n");
         }
       }
     }  // end for
     const auto close_status = std::fclose(fp);
     if (close_status != 0) {
-      AGORA_LOG_ERROR("SaveDecodeDataToFile error while closing file\n")
+      AGORA_LOG_ERROR("SaveDecodeDataToFile error while closing file\n");
     }
   }  // end else
 }
@@ -1290,7 +1305,7 @@ void Agora::SaveTxDataToFile(int frame_id) {
                  kTxDataFilename.c_str());
   auto* fp = std::fopen(kTxDataFilename.c_str(), "wb");
   if (fp == nullptr) {
-    AGORA_LOG_ERROR("SaveTxDataToFile error creating file pointer\n")
+    AGORA_LOG_ERROR("SaveTxDataToFile error creating file pointer\n");
   } else {
     for (size_t i = 0; i < cfg->Frame().NumDLSyms(); i++) {
       const size_t total_data_symbol_id =
@@ -1304,13 +1319,13 @@ void Agora::SaveTxDataToFile(int frame_id) {
         const auto write_status = std::fwrite(socket_ptr, sizeof(short),
                                               cfg->SampsPerSymbol() * 2, fp);
         if (write_status != cfg->SampsPerSymbol() * 2) {
-          AGORA_LOG_ERROR("SaveTxDataToFile error while writting file\n")
+          AGORA_LOG_ERROR("SaveTxDataToFile error while writting file\n");
         }
       }
     }
     const auto close_status = std::fclose(fp);
     if (close_status != 0) {
-      AGORA_LOG_ERROR("SaveTxDataToFile error while closing file\n")
+      AGORA_LOG_ERROR("SaveTxDataToFile error while closing file\n");
     }
   }
 }
