@@ -1,5 +1,5 @@
 {
-    "serial_file": "files/topology/topology-vulture.json",
+    "serial_file": "files/topology/topology-vulture-zhecun.json",
     "channel": "A",
     "frequency": 3.6e9,
     "rx_gain_a": 65,
@@ -30,19 +30,24 @@
     "client_dl_pilot_syms": 1,
     "beamsweep": false,
     "beacon_antenna": 0,
+    /*"beamforming": "MRC",*/
     "smooth_calib" : true,
     "hw_framer": true,
     "calibrate_digital" : false,
     /* UE configuration */
     "ue_channel": "A",
 
+    /* both rx gains decreased from 77 to 65 (better)*/
     "ue_rx_gain_a": [
-        77,
-        77
+        65,
+        65
     ],
+
+    /* 2nd tx gain decreased, for a better performance
+    under equal power allocation on agora */
     "ue_tx_gain_a": [
-        81,
-        81
+        76,
+        76
     ],
     "ue_rx_gain_b": [
         65,
@@ -68,7 +73,7 @@
     "worker_thread_num": 12,
     "socket_thread_num": 4,
     /* Vulture radios */
-    "ue_core_offset": 19,
+    "ue_core_offset": 18,   /*originally 19*/
     "ue_worker_thread_num": 2,
     "ue_socket_thread_num": 2,
     "demul_block_size": 48,

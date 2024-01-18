@@ -1230,15 +1230,21 @@ void Config::GenPilots() {
   ue_pilot_pre_ifft_.Calloc(this->ue_ant_num_, this->ofdm_ca_num_,
                             Agora_memory::Alignment_t::kAlign64);
   for (size_t i = 0; i < ue_ant_num_; i++) {
-    auto zc_ue_pilot_i = CommsLib::SeqCyclicShift(
+    auto zc_ue_pilot_i_tmp = CommsLib::SeqCyclicShift(
         zc_seq,
         (i + this->ue_ant_offset_) * (float)M_PI / 6);  // LTE DMRS
+    // blank-out each UE's zc_seq in a comb-fashion, for SINR measurement
+    auto zc_ue_pilot_i = CommsLib::SeqBlankOut(
+      zc_ue_pilot_i_tmp, 
+      i, 
+      ue_ant_num_
+    );
+
 
     for (size_t j = 0; j < this->ofdm_data_num_; j++) {
-      this->ue_specific_pilot_[i][j] = {zc_ue_pilot_i[j].real(),
+      this->ue_specific_pilot_[i][j] = {zc_ue_pilot_i[j].real(),  // a table of ue specific pilots are generated
                                         zc_ue_pilot_i[j].imag()};
     }
-
     std::memcpy(ue_pilot_ifft_[i] + ofdm_data_start_,
                 this->ue_specific_pilot_[i],
                 ofdm_data_num_ * sizeof(complex_float));
@@ -1246,7 +1252,7 @@ void Config::GenPilots() {
     std::memcpy(ue_pilot_pre_ifft_[i] + ofdm_data_start_,
                 ue_pilot_ifft_[i] + ofdm_data_start_,
                 ofdm_data_num_ * sizeof(complex_float));
-
+                
     CommsLib::FFTShift(ue_pilot_ifft_[i], ofdm_ca_num_);
     CommsLib::IFFT(ue_pilot_ifft_[i], ofdm_ca_num_, false);
   }
